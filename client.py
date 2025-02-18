@@ -210,85 +210,211 @@ class VerticalAirDirection(Enum):
 
 class DeviceConfig:
     def __init__(self):
+
+        # Whether this config/status structure is valid
         self.valid = False
+
+        # Indoor temperature set point, in integer degrees F, or in degrees C with a resolution
+        # of 0.5 degrees C.
         self.temp = -1
+
+        # Units for the indoor temperature set point
         self.temp_units = TempUnits.UNKNOWN
+
+        # Whether the indoor unit is on
         self.is_on = False
+
+        # Mode control for the system. Heat/Cool/Fan etc
         self.mode = DeviceMode.UNKNOWN
+
+        # Allows suppressing the power LED (and/or temperature display?) on the indoor unit
         self.light = False
+
+        # Possibly enable an air purifying / sanitizing feature? My unit lacks this feature so
+        # I am unable to test this.
         self.purify = False
 
+        # What type of temperature is displayed on the LED screen on the indoor unit.
+        # Possible values are the current indoor temp, the outdoor temp, or the indoor set point.
+        # Only seems to be set via the remote (via the TEMP button); mobile app doesn't set this,
+        # but it seems like this is possible via a command field not used by the mobile app.
+        # Note that the displayed temperature reverts to the current indoor temp after a few
+        # seconds, regardless of whether commanded via remote or wifi.
         # Reported via status message if set via RF remote. Mobile app doesn't seem to set this.
-        # Perhaps this can be set via on one of the unused bytes in the general command message.
         self.temp_display = TempDisplay.UNKNOWN
 
-        # Sent using a secondary type of config message, but reported
-        # via the general status message
+        # Settable using a secondary/extended config message by the mobile app, but reported
+        # via the general status message. Not settable via remote?
         self.eco_mode = False
 
         # Top-level fan state, which unifies:
-        # Speed / Quiet / Auto / Turbo
-        # Generally, speed will be 0 (AUTO) if quiet or turbo are on
-        self.fan_state = None   # None means 
+        #  - Speed level (1-5)
+        #  - Quiet
+        #  - Auto
+        #  - Turbo
+        # Generally, the app/remote will command a speed level of 0 (Auto) if Quiet or Turbo mode
+        # are on. Annoyingly, Quiet/Turbo mode are commanded via a different set of bits than the
+        # speed level, but we unify all of these into a single fan_state here
+        self.fan_state = None
+
+        # If fan_state is not None, the fan speed, turbo, and quiet_type settings will be
+        # calculated based on fan_state. This is the recommended approach - no need to manually
+        # set these.
         self.fan_speed = -1  # 0 = Auto
         self.turbo = False
         self.quiet_type = 0  # None, Auto, Quiet ?
+
+        # X-Fan is a feature that causes the indoor unit to run its fan for an additional few
+        # minutes after cooling/dehumidify has stopped, to dry the coils and prevent mold growth.
+        # Only relevant in cool/dry (dehumidify) mode.
         self.x_fan = False
+
+        # The X-Fan bit seems to do something completely different when in Heat mode, and the
+        # mobile app treats it as such. I suspect this may be one of the ways of enabling an
+        # additional electric heater (?) but my unit lacks such a thing, so I can't tell for
+        # sure.
         self.x_fan_for_heat = False
+
+        # Controls the valve on the indoor unit (if present) for blowing in outside air, or
+        # exhausting indoor air out. My unit lacks such a mechanism, so I cannot test this.
         self.intake_exhaust = ValveState.UNKNOWN
+
+        # This seems to be a fan speed setting for legacy units, that only supported three
+        # different fan levels? Calculated directly from fan_state, no need to set this
+        # directly.
         self.fan_speed_low_res = 0  # Calculated from full speed when set?
 
-        # Misc junk
+        # Misc junk. The mobile app retrieves these and passes them back to the unit as-is.
+        # Leave these be.
         self.mode_mystery_bit_3 = False     # Passed back to device as-is
         self.mode_mystery_bit_2 = False     # Passed back to device as-is
 
-        # Timer-related stuff
+        # Timer and scheduling-related stuff
+        # The unit seems to support two separate types of scheduled operations:
+        # - Timer-based scheduling:
+        #   - This will cause the unit to turn on or off after a configurable number of minutes.
+        #   - The unit has two separate timers- an on timer, and an off-timer, both counting down.
+        #   - Although the wireless remote allows the user to specify an on-time and an off-time,
+        #     it seems the remote converts these into durations (based on the remote's clock) and
+        #     programs the on-timer and off-timer. The remote does not seem to set the actual
+        #     clock on the unit itself
+        #   - The timer values are expressed in integer minutes.
+        #   - When sending a config message to the unit, there exists a special bit telling the
+        #     unit whether to latch in the new timer values. I suspect this prevents timer drift
+        #     that would result from quantization error if the timers were updated too frequently
+        #     (which may cause them to round down to the neatest minute?).
+        # - Scheduling mode
+        #   - On/Off operation is controlled directly by an on-time and off-time, rather than a
+        #     countdown timer
+        #   - In addition to the on/off times, there exists a bitmask of on-days / off-days,
+        #     allowing the on/off events to be scheduled on particular days of the week
+        #   - The mobile app sets the unit's clock and day-of-week on the unit
+        #   - Aside tracking the day-of-week, no calendar function seems to exist
+        #   - All times (clock, on-time, off-time) seem to be expressed in the number of minutes
+        #     since midnight.
+
+        # Global enable for the on/off countdown timers. Must be on for them to count
         self.timer_on_off_enable = False
+
+        # Enables countdown for the on-timer
         self.timer_on_enable = False
+
+        # Enables countdown for the off-timer
         self.timer_off_enable = False
-        self.sleep_curve_clock_invalid = False
-        self.clock = 0
-        self.day_of_week = 0
-        self.sleep_curve_clock = 0
+
+        # Values for the two countdown timers
         self.minutes_until_on = 0
         self.minutes_until_off = 0
+
+        # Current clock (time of day), expressed as number of minutes since midnight
+        self.clock = 0
+
+        # Current day of week (mapping TBD)
+        self.day_of_week = 0
+
+        # Clock value used for sleep curves (used in Mobile UI, unsure if anywhere else)
+        self.sleep_curve_clock = 0
+
+        # Whether the sleep curve clock is valid
+        self.sleep_curve_clock_invalid = False
+
+        # Clock times when the unit should turn on and off, expressed as minutes since midnight
         self.on_time = 0
         self.off_time = 0
 
+        # Bit masks for days of week when the unit should automatically turn on or off, in
+        # accordance with the above scheduling. Only seems to be relevant for clock-based
+        # scheduling, but I am not sure.
+        # Mon = 2, Tue = 4, Wed = 8, Thu = 10, Fri = 20, Sat = 40, Sun = 80
+        self.day_of_week_on_mask = 0
+        self.day_of_week_off_mask = 0
+
+        # Whether to use clock-based or timer-based scheduling.
+        # Remote likes timer-based scheduling; the mobile app seems to use clock-based scheduling
         # 1 = use on time / off time for scheduling?
         # 0 = use countdown timers for scheduling?
         self.timer_on_use_clock = 0
         self.timer_off_use_clock = 0
 
-        # Mon = 2, Tue = 4, Wed = 8, Thu = 10, Fri = 20, Sat = 40, Sun = 80
-        self.day_of_week_on_mask = 0
-        self.day_of_week_off_mask = 0
-
+        # Direction for pointing the motorized air guider
+        # The horizontal/vertical position can be commanded directly, or be put into "swing"
+        # mode, which will cause the vent to swing back and forth.
+        # Although the mobile UI implies otherwise, it does not actually seem possible to set
+        # the swing range (though maybe some of the weird "regional swing" stuff may permit
+        # this).
+        # Regrettably, the remote doesn't allow setting a direction manually, and only allows
+        # us to toggle the swing on and off. But the app can directly command a direction.
         self.horizontal_air_direction = HorizontalAirDirection.UNKNOWN
         self.vertical_air_direction = VerticalAirDirection.UNKNOWN
 
-        # Untested; my unit lacks this feature
+        # Humidifier control, as determined by analyzing the mobile app.
+        # Completely untested; my unit lacks this feature
         self.humidify_type = HumidifyType.NONE
+
+        # Another type of "heat assist" field, controllable via the mobile app. Unsure what this
+        # does (possibly another way of enabling an electric heater, if present). The mobile app
+        # has two separate UI settings: e-heater, and "new" e-heater. Your mileage may vary here.
         self.heat_assist = False
 
-        # Sleep curve stuff
+        # Sleep curve stuff. These seem kind of silly - see the user manual for the indoor unit
+        # for details.
         self.sleep_curve_type = SleepCurveType.NONE
+
+        # Temperatures used for the custom sleep curve. These have less precision than regular
+        # temp control (maybe within one degree C / two degrees F)
         self.custom_sleep_curve = [0] * 8
 
-        # Noise control
+        # Noise control. This too seems silly. The mobile app has a "noise control" feature, which
+        # allows setting a max fan noise level (in dB), separately for heating and cooling mode.
+        # The mobile app seems to enforce this simply by limiting the fan speed based on the
+        # current mode and max noise level. Despite this, the noise levels are passed to the unit
+        # and retrieved from the unit. It is not clear if the unit actually does anything with
+        # these values, or if it purely relies on the app to request a lower fan speed based on
+        # the requested noise level.
         self.noise_control_enable = False
-        self.noise_control_heating = 30
-        self.noise_control_cooling = 30
+        self.noise_control_heating = 30  # dB
+        self.noise_control_cooling = 30  # dB
 
-        # Region swing stuff, untested
+        # Region swing stuff, untested. The mobile UI for this seems incredibly confusing, but
+        # it may allow limiting the horizontal swing direction if the indoor unit is mounted near
+        # a wall. Very untested; details TBD
         self.regional_swing_position = 0
         self.regional_swing_avoid_people = False
 
-        # Determined experimentally
+        # Remote temp sensor. Under most conditions, the thermostat on the indoor unit is driven
+        # by a temp/humidify sensor found inside the indoor unit. But, the remote has a feature
+        # called "FOLLOW ME" (sometimes called "I FEEL") which causes the unit to use a temp
+        # sensor found *inside the remote* for temperature control. Although the mobile app does
+        # not have such a feature, it seems possible to activate the "I FEEL" / "FOLLOW ME" mode
+        # via wifi, and to supply periodic updates of the remote temperature.
+        # Determined experimentally, poorly. Your mileage may vary.
+        # It looks like the unit will not actually "latch" the remote temperature reading unless
+        # we also set a separate bit indicating that this reading is valid.
+        # See EncodeRemoteTempUpdate().
         self.use_remote_temp_sensor = False
-        self.remote_temp_val = 0  # Seems to be in C, regardless of units?
+        self.remote_temp_val = 0  # Seems to be in C, regardless of units
 
-        # Unknown
+        # Unknown. The remote seems to set this to 1, when configuring on/off times
         self.timer_remote_flag = False
 
     def DecodeTemp(self, upper, lower):
@@ -412,8 +538,6 @@ class DeviceConfig:
         self.humidify_type = HumidifyType(GetBits(buf[14], 4, 3))
         self.heat_assist = GetBit(buf[15], 7)
 
-        # 16 17 18 - timer stuff
-
         self.minutes_until_on = ((buf[17] & 0x70) << 4) | buf[16]
         self.minutes_until_off = ((buf[18] & 0x7F) << 4) | (buf[17] & 0x0F)
 
@@ -426,11 +550,13 @@ class DeviceConfig:
         else:
             self.sleep_curve_type = SleepCurveType(((buf[8] & 0x08) >> 2) | ((buf[20] & 0x10) >> 4))
 
-
         self.DecodeCustomSleepCurve(buf)
 
-        # Determined experimentally
+        # Determined experimentally. Always in degrees C, regardless of units setting
+        # The mobile app sets this to 0?
         self.remote_temp_val = buf[28]
+        # buf[27] appears to be similarly unused/unset by the mobile app. Maybe this is a
+        # remote humidity measurement??
 
         self.clock = ((buf[29] & 0x7f) << 8) | buf[30]
 
@@ -791,26 +917,23 @@ while True:
 
     # Hack, for initial testing. After receiving the first status message, send a test config.
     if cfg.valid and not sent:
-        cfg.noise_control_enable = False
         cfg.fan_state = FanState.LEVEL_5
         cfg.mode = DeviceMode.HEAT
         cfg.temp_units = TempUnits.FAHRENHEIT
         cfg.is_on = True
         cfg.temp = 72  # Set point
-        cfg.temp_display = TempDisplay.NONE
-        cfg.remote_temp_val = 25  # Always in C
-        cfg.use_remote_temp_sensor = False
+        cfg.temp_display = TempDisplay.INDOOR  # Reverts after a few sec
+        cfg.vertical_air_direction = VerticalAirDirection.CENTER_DOWN
 
         # Seems to be set by unit, regardless of what we do?
         cfg.timer_remote_flag = False
 
-        # Test: turn on the heat to 74F, for ten minutes, then turn off
+        # Test: turn on the heat to 72F, for ten minutes, then turn off
         cfg.timer_on_off_enable = True
         cfg.timer_off_enable = True
         cfg.timer_on_enable = False
         cfg.minutes_until_on = 0
         cfg.minutes_until_off = 10
-        cfg.vertical_air_direction = VerticalAirDirection.CENTER_DOWN
         sock.SendConfig(cfg)
 
         sent = True
